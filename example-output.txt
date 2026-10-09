@@ -1,0 +1,10 @@
+PASS nan_red_green: confirmed defect; existing PR #239 (170.8 ms)
+PASS per_fe_budget: expected per-request retry behavior (170.4 ms)
+PASS dns_plus_http: budget-scope design question (126.6 ms)
+PASS dns_connect_bound: infinite-caller-wait hypothesis disproved (60.7 ms)
+PASS native_dns_cancel: bounded caller; resolver worker can continue (0.7 ms)
+PASS mixed_dns_rejected: SSRF boundary preserved (0.2 ms)
+6 loopback cases passed; JSON written to .lab/results.json
+Ran 4 tests in 0.068s
+OK
+DONE: 6 cases and 4 guard tests passed

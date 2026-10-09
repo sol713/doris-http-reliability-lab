@@ -1,0 +1,95 @@
+{
+  "lab_version": "0.1.0",
+  "recorded_at_utc": "2026-10-09T06:24:34.335361+00:00",
+  "baseline_commit": "5daf1deb26bc0db02c19bf5ca1d070acea4cfab9",
+  "source_url": "https://raw.githubusercontent.com/apache/doris-mcp-server/5daf1deb26bc0db02c19bf5ca1d070acea4cfab9/doris_mcp_server/utils/doris_http_client.py",
+  "baseline_sha256": "ef2ec7ea1ad8fd9f734a38516202b15e0eb7c4d852f3a22bc2b55cd1630ec115",
+  "runtime_patch_sha256": "898bcd7baaeaa37c04de88bb98ad95b278257451dfc8268b05b1f78941ea357f",
+  "python": "3.12.14",
+  "dependencies": {
+    "aiohappyeyeballs": "2.6.1",
+    "aiohttp": "3.14.3",
+    "aiosignal": "1.4.0",
+    "attrs": "25.3.0",
+    "frozenlist": "1.6.2",
+    "idna": "3.18",
+    "multidict": "6.4.4",
+    "propcache": "0.3.1",
+    "typing-extensions": "4.16.0",
+    "yarl": "1.20.0"
+  },
+  "experiment_network": "127.0.0.1 only; synthetic DNS",
+  "generated_by": "OpenAI Codex (GPT-6)",
+  "cases": [
+    {
+      "case": "nan_red_green",
+      "classification": "confirmed defect; existing PR #239",
+      "elapsed_ms": 170.767,
+      "sessions": 2,
+      "connectors": 2,
+      "resources_closed": true,
+      "baseline_deadline_check": "RED: NaN retained",
+      "patched_deadline_check": "GREEN: finite fallback",
+      "baseline_ms": 126.881,
+      "patched_ms": 42.717,
+      "lab_fallback_seconds": 0.04,
+      "production_fallback_seconds": 30,
+      "tcp_requests": 2
+    },
+    {
+      "case": "per_fe_budget",
+      "classification": "expected per-request retry behavior",
+      "elapsed_ms": 170.363,
+      "sessions": 2,
+      "connectors": 2,
+      "resources_closed": true,
+      "total_per_attempt_seconds": 0.12,
+      "attempts": 2
+    },
+    {
+      "case": "dns_plus_http",
+      "classification": "budget-scope design question",
+      "elapsed_ms": 126.593,
+      "sessions": 1,
+      "connectors": 1,
+      "resources_closed": true,
+      "dns_delay_seconds": 0.09,
+      "http_delay_seconds": 0.03,
+      "http_total_seconds": 0.05,
+      "dns_lookups": 1,
+      "address_pinned": true
+    },
+    {
+      "case": "dns_connect_bound",
+      "classification": "infinite-caller-wait hypothesis disproved",
+      "elapsed_ms": 60.72,
+      "sessions": 0,
+      "connectors": 0,
+      "resources_closed": true,
+      "connect_seconds": 0.06,
+      "resolver_cancelled": true
+    },
+    {
+      "case": "native_dns_cancel",
+      "classification": "bounded caller; resolver worker can continue",
+      "elapsed_ms": 0.714,
+      "sessions": 0,
+      "connectors": 0,
+      "resources_closed": true,
+      "cancellation_ms": 0.172,
+      "worker_running_at_cancel_return": true,
+      "worker_released_and_finished": true
+    },
+    {
+      "case": "mixed_dns_rejected",
+      "classification": "SSRF boundary preserved",
+      "elapsed_ms": 0.184,
+      "sessions": 0,
+      "connectors": 0,
+      "resources_closed": true,
+      "tcp_requests": 0,
+      "metadata_address_is_synthetic": true
+    }
+  ],
+  "passed": 6
+}

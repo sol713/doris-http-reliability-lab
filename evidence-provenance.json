@@ -1,0 +1,42 @@
+{
+  "verified_at_utc": "2026-10-09T06:23:52.063967+00:00",
+  "upstream_repository": "https://github.com/apache/doris-mcp-server",
+  "base_commit": "5daf1deb26bc0db02c19bf5ca1d070acea4cfab9",
+  "existing_fix_pr": "https://github.com/apache/doris-mcp-server/pull/239",
+  "pr_status_when_checked": {
+    "date": "2026-10-09",
+    "state": "open",
+    "merged": false
+  },
+  "original_evidence_verification": {
+    "nan_regressions": {
+      "baseline_failed": 12,
+      "baseline_passed": 4,
+      "fixed_http_passed": 34,
+      "method": "Red/green logs and runtime patch matched their saved archive; exact runtime patch bytes match this lab."
+    },
+    "multi_fe": {
+      "passed": 12,
+      "method": "JSON measurements, result record, and test log matched their saved archive."
+    },
+    "dns_preflight": {
+      "passed": 14,
+      "method": "SHA-256 manifest verified against all recorded files and archive."
+    }
+  },
+  "sharing_boundary": "Only freshly generated minimal results and public source identifiers are included. No original private reports, raw logs, filesystem paths, credentials, or private application code are included.",
+  "lab_replay_scope": "Six curated cases plus four guard tests; not a repeat of full upstream release gates.",
+  "generated_by": "OpenAI Codex (GPT-6)",
+  "lab_clean_replay": {
+    "recorded_at_utc": "2026-10-09T06:24:34.335361+00:00",
+    "python": "3.12.14",
+    "fresh_virtual_environment": true,
+    "source_cache_preseeded": false,
+    "dependency_cache_used": false,
+    "public_pypi_install": "passed; fixed binary wheels, require-hashes",
+    "public_upstream_download": "passed; pinned commit and SHA-256 verified",
+    "loopback_cases_passed": 6,
+    "guard_tests_passed": 4,
+    "warnings_as_errors": true
+  }
+}

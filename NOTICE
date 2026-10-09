@@ -1,0 +1,16 @@
+Doris HTTP Reliability Lab
+
+This educational lab downloads and adapts the HTTP client module from:
+
+Apache Doris MCP Server
+Copyright 2025-2026 The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+The lab preserves the downloaded module's Apache-2.0 header. Its in-memory
+adaptation is identified in source and explained in README.md. The Apache
+Ossie schema is not downloaded or included; that separate upstream NOTICE
+entry does not pertain to this HTTP module.
+
+This is an independent educational project, without Apache endorsement.

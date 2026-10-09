@@ -1,0 +1,22 @@
+# CPython 3.12, Linux x86_64; public upstream uv.lock versions and wheel hashes.
+# No source builds; every runtime dependency is pinned and hash checked.
+aiohappyeyeballs==2.6.1 \
+    --hash=sha256:f349ba8f4b75cb25c99c5c2d84e997e485204d2902a9597802b0371f09331fb8
+aiohttp==3.14.3 \
+    --hash=sha256:543906c127fb1d929b95076db19b83fa2d46751006ff1e23b093aa5ac4d8db42
+aiosignal==1.4.0 \
+    --hash=sha256:053243f8b92b990551949e63930a839ff0cf0b0ebbe0597b0f3fb19e1a0fe82e
+attrs==25.3.0 \
+    --hash=sha256:427318ce031701fea540783410126f03899a97ffc6f61596ad581ac2e40e3bc3
+frozenlist==1.6.2 \
+    --hash=sha256:88b1b79ae86fdacc4bf842a4e0456540947abba64a84e61b5ae24c87adb089db
+idna==3.18 \
+    --hash=sha256:7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2
+multidict==6.4.4 \
+    --hash=sha256:a920f9cf2abdf6e493c519492d892c362007f113c94da4c239ae88429835bad1
+propcache==0.3.1 \
+    --hash=sha256:563f9d8c03ad645597b8d010ef4e9eab359faeb11a0a2ac9f7b4bc8c28ebef25
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+yarl==1.20.0 \
+    --hash=sha256:bf099e2432131093cc611623e0b0bcc399b8cddd9a91eded8bfb50402ec35018
