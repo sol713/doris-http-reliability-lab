@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+# Generated-by: OpenAI Codex (GPT-6)
+name: Verify lab
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  replay:
+    name: Cold loopback replay
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact head
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up CPython 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          architecture: x64
+          cache: ''
+
+      - name: Verify manifest and cold replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e .lab
+          sha256sum --check MANIFEST.sha256
+          git rev-parse HEAD
+          python3 lab.py

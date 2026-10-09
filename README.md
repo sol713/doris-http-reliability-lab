@@ -35,6 +35,14 @@ exit nonzero. There is no silent mirror/cache fallback. A previously downloaded
 module is reused only after rechecking its hash. The environment supports the
 fixed platform above; other Python/platform combinations have not been tested.
 
+The [CI workflow](.github/workflows/verify-lab.yml) checks pull requests and pushes
+to `main` on standard Ubuntu 24.04 x86_64 with CPython 3.12. It verifies the
+committed manifest and an empty `.lab` directory, then invokes `python3 lab.py`
+once, including the four guard tests. Official actions are pinned to commit
+SHAs; the token has only `contents: read`, and dependency caching is disabled.
+The job runs only while the repository is public, where standard hosted runners
+are [free under GitHub's documented terms](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+
 ## What the cases establish
 
 | Case | Evidence | Classification |
