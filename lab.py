@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime
+import fcntl
 import hashlib
 import importlib.metadata
 import json
@@ -14,8 +15,10 @@ import os
 import platform
 import subprocess
 import sys
+import tempfile
 import types
 import urllib.request
+import uuid
 from pathlib import Path
 
 BASE_COMMIT = "5daf1deb26bc0db02c19bf5ca1d070acea4cfab9"
@@ -104,7 +107,78 @@ def checked(command: list[str], timeout: int, label: str) -> None:
         raise RuntimeError(f"{label} failed (exit {result.returncode})")
 
 
-def run_lab() -> None:
+def atomic_json(path: Path, report: dict) -> None:
+    """Publish complete JSON on the same filesystem; leave no partial target."""
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(json.dumps(report, indent=2) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def utc_now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def recorded_run(action, *, scope: str = "full") -> None:
+    """Own the latest result until this invocation has a terminal outcome."""
+    WORK.mkdir(exist_ok=True)
+    with (WORK / "run.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("another lab run owns .lab/results.json") from exc
+        run_id = uuid.uuid4().hex
+        run_dir = WORK / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        latest = WORK / "results.json"
+        # Invalidate old success before any setup/check, preserving exact bytes.
+        if latest.exists():
+            os.replace(latest, run_dir / "previous-results.json")
+        report = {
+            "result_schema_version": 1,
+            "run_id": run_id,
+            "scope": scope,
+            "status": "running",
+            "started_at_utc": utc_now(),
+            "phase": "startup",
+            "cases": [],
+            "passed": 0,
+        }
+
+        def save() -> None:
+            atomic_json(run_dir / "results.json", report)
+            atomic_json(latest, report)
+
+        save()
+        print(f"RUN {run_id}: {scope}; started {report['started_at_utc']}", flush=True)
+        try:
+            action(report, save, run_dir / "cases.json")
+        except BaseException as exc:
+            report.update(
+                status="failed",
+                finished_at_utc=utc_now(),
+                error={"type": type(exc).__name__, "message": str(exc)},
+            )
+            save()
+            raise
+        report.update(
+            status="success" if scope == "full" else "cases_passed",
+            phase="complete",
+            finished_at_utc=utc_now(),
+        )
+        save()
+
+
+def run_lab() -> dict:
     from cases import run_cases
 
     data = SOURCE.read_bytes()
@@ -121,7 +195,7 @@ def run_lab() -> None:
             dependencies[name] = actual
     report = {
         "lab_version": "0.1.0",
-        "recorded_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "recorded_at_utc": utc_now(),
         "baseline_commit": BASE_COMMIT,
         "source_url": SOURCE_URL,
         "baseline_sha256": BASE_SHA256,
@@ -133,27 +207,20 @@ def run_lab() -> None:
         "cases": rows,
         "passed": len(rows),
     }
-    (WORK / "results.json").write_text(json.dumps(report, indent=2) + "\n")
     for row in rows:
         print(
             f"PASS {row['case']}: {row['classification']} ({row['elapsed_ms']:.1f} ms)"
         )
-    print(f"{len(rows)} loopback cases passed; JSON written to .lab/results.json")
+    print(f"{len(rows)} loopback cases passed")
+    return report
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fetch", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--run", action="store_true", help=argparse.SUPPRESS)
-    args = parser.parse_args()
-    if args.fetch:
-        fetch_source()
-        return
-    if args.run:
-        if sys.flags.optimize:
-            raise RuntimeError("experiment checks require Python assertions enabled")
-        run_lab()
-        return
+def bootstrap(report: dict, save, case_output: Path) -> None:
+    def phase(name: str) -> None:
+        report["phase"] = name
+        save()
+
+    phase("runtime")
     if (
         sys.version_info[:2] != (3, 12)
         or platform.python_implementation() != "CPython"
@@ -163,10 +230,12 @@ def main() -> None:
         raise RuntimeError("supported bootstrap: CPython 3.12 on Linux x86_64")
     WORK.mkdir(exist_ok=True)
     interpreter = WORK / "venv" / "bin" / "python"
+    phase("venv")
     if not interpreter.exists():
         # venv creation runs in a bounded child as well as dependency installation.
         checked([sys.executable, "-m", "venv", str(WORK / "venv")], 60, "venv")
     print("SETUP: public PyPI, fixed binary wheels and SHA-256 hashes", flush=True)
+    phase("dependency_install")
     checked(
         [
             str(interpreter),
@@ -189,24 +258,75 @@ def main() -> None:
         180,
         "pinned dependency install",
     )
+    phase("dependency_check")
     checked(
         [str(interpreter), "-m", "pip", "--no-cache-dir", "check"],
         20,
         "dependency check",
     )
+    phase("source_download")
     checked([str(interpreter), "lab.py", "--fetch"], 45, "source download")
-    checked([str(interpreter), "-W", "error", "lab.py", "--run"], 30, "loopback cases")
+    phase("cases")
     checked(
-        [str(interpreter), "-W", "error", "-m", "unittest", "-q", "test_lab"],
+        [
+            str(interpreter), "-W", "error", "lab.py", "--run",
+            "--case-output", str(case_output),
+        ],
+        30,
+        "loopback cases",
+    )
+    report.update(json.loads(case_output.read_text()))
+    phase("guard_tests")
+    checked(
+        [
+            str(interpreter), "-W", "error", "-m", "unittest", "-q",
+            "test_lab", "test_results",
+        ],
         20,
         "guard tests",
     )
-    print("DONE: 6 cases and 4 guard tests passed", flush=True)
+    report["guard_tests"] = {"status": "passed", "modules": ["test_lab", "test_results"]}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--fetch", action="store_true", help=argparse.SUPPRESS)
+    modes.add_argument("--run", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--case-output", type=Path, help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if args.case_output is not None and not args.run:
+        parser.error("--case-output requires --run")
+    if args.fetch:
+        fetch_source()
+        return
+
+    def cases_only(report, save, case_output):
+        report["phase"] = "cases"
+        save()
+        if sys.flags.optimize:
+            raise RuntimeError("experiment checks require Python assertions enabled")
+        report.update(run_lab())
+
+    if args.run:
+        if args.case_output is not None:
+            # Internal child: the parent owns latest and the complete-run status.
+            if sys.flags.optimize:
+                raise RuntimeError("experiment checks require Python assertions enabled")
+            atomic_json(args.case_output, run_lab())
+        else:
+            recorded_run(cases_only, scope="cases_only")
+        return
+    recorded_run(bootstrap)
+    print(
+        "DONE: 6 cases, source guards and result regression tests passed; "
+        "JSON written to .lab/results.json", flush=True,
+    )
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+    except (Exception, KeyboardInterrupt) as exc:
         print(f"LAB FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         sys.exit(1)

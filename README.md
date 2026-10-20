@@ -23,7 +23,8 @@ python3 lab.py
 The command creates a local `.lab/venv`, installs ten fixed binary-wheel
 dependencies with SHA-256 verification, checks their dependency consistency,
 downloads one pinned public upstream module, verifies its SHA-256, then runs
-six cases and four guard tests. It does not install anything into the system
+six cases, four source/network guard tests, and result-lifecycle regression
+tests. It does not install anything into the system
 Python, change production settings, start a database, or require credentials.
 Downloads are setup operations; the experiment phase permits connections
 only to **127.0.0.1**, with an additional socket guard. It makes no real DNS
@@ -68,10 +69,44 @@ The original feature describes [ordered FE retries in PR #163](https://github.co
 
 ## Output and interpretation
 
-Each run writes `.lab/results.json`, including dependency versions, source
-hashes, classifications, timings, and observed resource cleanup. A real cloud
-run is included in [example-results.json](example-results.json), with its
-corresponding [case output](example-output.txt). Timings vary with scheduling.
+Each full invocation publishes `.lab/results.json`. Only `status: "success"`
+with `scope: "full"` means setup, all six cases, and both test modules passed.
+`passed` counts completed cases; it does **not** indicate overall success. On
+success the existing dependency versions, source hashes, classifications,
+timings, and resource cleanup fields remain available.
+
+The runner prints a unique `run_id` and actual UTC start time. Before setup it
+moves the previous result, byte for byte, to
+`.lab/runs/<new-run-id>/previous-results.json`, then writes a new `running`
+record. Every phase and terminal record is written to that run's `results.json`
+and atomically replaces the latest result using a temporary file on the same
+filesystem. The files are individually atomic; they are not a multi-file
+transaction or a guarantee against power loss. A nonblocking Linux file lock
+rejects concurrent full/standalone case runs without changing the active run.
+
+Failures publish `status: "failed"`, the phase, exception type/message, and
+actual UTC finish time, then exit nonzero. A child failure records its stage
+and exit code; its detailed traceback remains in terminal output. If guards
+fail after cases pass, the current case evidence remains available but the
+overall status is `failed`. If cases fail before returning, no partial case
+list is claimed. The case child writes only its unique run's `cases.json`;
+it cannot publish overall success. `finished_at_utc` is added only on a
+terminal outcome. Readers should match the printed `run_id` to the invocation
+they are assessing, and require both a successful process exit and full
+success status. A killed process, machine failure, or result-write error can
+leave `running` or no latest result; neither is success. An unwritable work
+directory or failed archive stops execution and cannot promise a new record.
+
+Hidden `--run` is a cases-only diagnostic: a successful standalone call uses
+`scope: "cases_only"` and `status: "cases_passed"`, without claiming guards or
+setup. Hidden `--fetch` only prepares the source; it does not start a lab run
+or update result status. Run history is retained locally without automatic
+pruning; remove `.lab/runs/` yourself when the evidence is no longer needed.
+
+The historical [example-results.json](example-results.json) and corresponding
+[case output](example-output.txt) are unchanged evidence from the real
+2026-10-09 cloud run, before this status schema. They are not a result of the
+current invocation. Timings vary with scheduling.
 
 ```text
 PASS nan_red_green: confirmed defect; existing PR #239
@@ -80,7 +115,7 @@ PASS dns_plus_http: budget-scope design question
 PASS dns_connect_bound: infinite-caller-wait hypothesis disproved
 PASS native_dns_cancel: bounded caller; resolver worker can continue
 PASS mixed_dns_rejected: SSRF boundary preserved
-DONE: 6 cases and 4 guard tests passed
+DONE: 6 cases, source guards and result regression tests passed; JSON written to .lab/results.json
 ```
 
 The complete program also prints measured milliseconds and setup progress.
@@ -96,6 +131,16 @@ bound. The parent bounds the experiment process to 30 seconds. Setup stages
 also have independent process limits: venv 60s, package install 180s, dependency
 check 20s, source download 45s, and guard tests 20s. These watchdogs make a broken
 case fail rather than silently wait forever; they are not product timeout fixes.
+
+Result regressions run without downloads or runtime dependencies and use
+temporary directories and controlled failures:
+
+```bash
+python3 -W error -m unittest -v test_results
+```
+
+The normal `python3 lab.py` command includes these regressions and the original
+four guards under warnings-as-errors, after the real loopback cases.
 
 ## Sources and limits
 
