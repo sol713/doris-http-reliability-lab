@@ -83,6 +83,20 @@ and atomically replaces the latest result using a temporary file on the same
 filesystem. The files are individually atomic; they are not a multi-file
 transaction or a guarantee against power loss. A nonblocking Linux file lock
 rejects concurrent full/standalone case runs without changing the active run.
+The lock descriptor is also passed to each direct `checked()` child. If only
+the parent receives SIGTERM or SIGKILL, a surviving direct child that retains
+this descriptor continues to hold the same lock until it exits. A second run
+is rejected during that interval, preserving the interrupted result and its
+history. This improves the parent-exit concurrency boundary; it does not turn
+forced termination into a completed or successful lab run.
+
+There is no automatic cleanup of an arbitrary descendant/daemon tree. A child
+that closes the inherited descriptor, or descendants that do not retain it,
+are outside this lock-lifetime guarantee. The parent's subprocess watchdogs
+also stop when that parent is killed. If a surviving child stalls while
+holding the lock, inspect that process and wait for or stop it before retrying;
+do not delete or replace `.lab/run.lock` to bypass a live lock. Power loss and
+hard-kill terminal-result guarantees remain excluded.
 
 Failures publish `status: "failed"`, the phase, exception type/message, and
 actual UTC finish time, then exit nonzero. A child failure records its stage
@@ -133,7 +147,14 @@ check 20s, source download 45s, and guard tests 20s. These watchdogs make a brok
 case fail rather than silently wait forever; they are not product timeout fixes.
 
 Result regressions run without downloads or runtime dependencies and use
-temporary directories and controlled failures:
+temporary directories and controlled failures. Linux cross-process tests use
+socket handshakes, real parent-only SIGTERM/SIGKILL, and explicitly reap their
+own simulated children; their ordering does not depend on sleeps. They verify
+that a contender cannot change latest/history while that child holds the lock,
+and can enter after the child exits. These process regressions explicitly skip
+when Python or the kernel lacks pidfd support; a skip does not verify this
+boundary. Permission errors and other test failures are not treated as missing
+support:
 
 ```bash
 python3 -W error -m unittest -v test_results

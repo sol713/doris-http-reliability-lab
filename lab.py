@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextvars
 import datetime
 import fcntl
 import hashlib
@@ -31,6 +32,7 @@ FIXED_SHA256 = "898bcd7baaeaa37c04de88bb98ad95b278257451dfc8268b05b1f78941ea357f
 ROOT = Path(__file__).resolve().parent
 WORK = ROOT / ".lab"
 SOURCE = WORK / "upstream_http.py"
+RUN_LOCK_FD = contextvars.ContextVar("run_lock_fd", default=None)
 OLD = (
     "    if parsed <= 0:\n"
     "        return default\n"
@@ -100,8 +102,11 @@ def clean_environment() -> dict[str, str]:
 
 
 def checked(command: list[str], timeout: int, label: str) -> None:
+    lock_fd = RUN_LOCK_FD.get()
     result = subprocess.run(
-        command, cwd=ROOT, env=clean_environment(), timeout=timeout, check=False
+        command, cwd=ROOT, env=clean_environment(), timeout=timeout, check=False,
+        # Keep the same flock alive if the supervising parent is killed.
+        pass_fds=() if lock_fd is None else (lock_fd,),
     )
     if result.returncode:
         raise RuntimeError(f"{label} failed (exit {result.returncode})")
@@ -160,6 +165,7 @@ def recorded_run(action, *, scope: str = "full") -> None:
 
         save()
         print(f"RUN {run_id}: {scope}; started {report['started_at_utc']}", flush=True)
+        token = RUN_LOCK_FD.set(lock.fileno())
         try:
             action(report, save, run_dir / "cases.json")
         except BaseException as exc:
@@ -170,6 +176,8 @@ def recorded_run(action, *, scope: str = "full") -> None:
             )
             save()
             raise
+        finally:
+            RUN_LOCK_FD.reset(token)
         report.update(
             status="success" if scope == "full" else "cases_passed",
             phase="complete",

@@ -3,10 +3,16 @@
 """Offline result lifecycle regressions; every run uses an isolated workdir."""
 
 import contextlib
+import ctypes
 import datetime
+import errno
 import io
 import json
+import os
 from pathlib import Path
+import select
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -260,5 +266,281 @@ class Results(unittest.TestCase):
         self.assertFalse((self.work / "runs").exists())
 
 
+class ProcessResults(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+            raise unittest.SkipTest("process regressions need Python pidfd APIs")
+        try:
+            descriptor = os.pidfd_open(os.getpid())
+        except OSError as exc:
+            if exc.errno == errno.ENOSYS:
+                raise unittest.SkipTest("process regressions need Linux pidfd support") from exc
+            raise
+        else:
+            os.close(descriptor)
+
+    def run_scenario(self, mode):
+        result = subprocess.run(
+            [sys.executable, "-W", "error", str(Path(__file__).resolve()),
+             "--signal-worker", "scenario", mode],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        finding = next(line for line in result.stdout.splitlines()
+                       if line.startswith("PROCESS_FINDING "))
+        cleanup = next(line for line in result.stdout.splitlines()
+                       if line.startswith("PROCESS_CLEANUP "))
+        cleaned = json.loads(cleanup.removeprefix("PROCESS_CLEANUP "))
+        self.assertTrue(cleaned["parent_reaped"] and cleaned["child_reaped"])
+        print(finding, flush=True)
+        print(cleanup, flush=True)
+        return json.loads(finding.removeprefix("PROCESS_FINDING "))
+
+    def test_sigterm_parent_retains_exclusion_until_direct_child_exits(self):
+        finding = self.run_scenario("SIGTERM")
+        self.assertEqual(finding["parent_returncode"], -signal.SIGTERM)
+
+    def test_sigkill_parent_retains_exclusion_until_direct_child_exits(self):
+        finding = self.run_scenario("SIGKILL")
+        self.assertEqual(finding["parent_returncode"], -signal.SIGKILL)
+
+    def test_checked_timeout_reaps_direct_child_and_releases_lock(self):
+        finding = self.run_scenario("timeout")
+        self.assertEqual(finding["parent_returncode"], 0)
+        self.assertEqual(finding["interrupted_status"], "failed")
+        self.assertEqual(finding["error_type"], "TimeoutExpired")
+
+
+def process_worker(mode, *arguments):
+    """Local helpers execute in separate processes, never in the test runner."""
+    script = str(Path(__file__).resolve())
+    if mode == "child":
+        socket_path, directory = arguments
+        signal.alarm(8)  # A failing test cannot leave this simulated child alive.
+        with socket.socket(socket.AF_UNIX) as channel:
+            channel.settimeout(5)
+            channel.connect(socket_path)
+            channel.sendall((json.dumps({"pid": os.getpid()}) + "\n").encode())
+            with channel.makefile("rb") as messages:
+                for command in messages:
+                    if command == b"PING\n":
+                        channel.sendall(b"ALIVE\n")
+                    elif command == b"WRITE\n":
+                        work = Path(directory) / ".lab"
+                        run_id = json.loads((work / "results.json").read_text())["run_id"]
+                        (work / "child-write").write_text(run_id)
+                        channel.sendall((run_id + "\n").encode())
+                    elif command == b"EXIT\n":
+                        channel.sendall(b"EXITING\n")
+                        return
+        return
+    if mode in {"parent", "contender"}:
+        directory, *extra = arguments
+        root = Path(directory)
+        lab.ROOT, lab.WORK = root, root / ".lab"
+        if mode == "contender":
+            def action(report, save, output):
+                (root / "entered").write_text(report["run_id"])
+            try:
+                lab.recorded_run(action)
+            except RuntimeError as exc:
+                if "another lab run owns" not in str(exc):
+                    raise
+                print("CONTENDER_REJECTED", flush=True)
+                sys.exit(23)
+            return
+        socket_path, scenario = extra
+        def action(report, save, output):
+            report["phase"] = "controlled_child"
+            save()
+            command = [sys.executable, "-W", "error", script, "--signal-worker",
+                       "child", socket_path, str(root)]
+            if scenario != "timeout":
+                lab.checked(command, 6, "controlled direct child")
+                return
+            original_spawn = subprocess.Popen
+            def synchronized_spawn(*args, **kwargs):
+                process = original_spawn(*args, **kwargs)
+                try:
+                    with socket.socket(socket.AF_UNIX) as arm:
+                        arm.settimeout(3)
+                        arm.connect(str(root / "arm.sock"))
+                        arm.sendall(b"SPAWNED\n")
+                        with arm.makefile("rb") as messages:
+                            if messages.readline() != b"ARM\n":
+                                raise RuntimeError("timeout handshake failed")
+                except BaseException:
+                    process.kill()
+                    process.communicate(timeout=3)
+                    raise
+                return process
+            # run() starts its real timeout after Popen returns. Only synchronize
+            # creation here; its communicate/kill/wait behavior stays unchanged.
+            with patch.object(subprocess, "Popen", synchronized_spawn):
+                lab.checked(command, 0.05, "controlled direct child")
+        try:
+            lab.recorded_run(action)
+        except subprocess.TimeoutExpired:
+            if scenario != "timeout":
+                raise
+        return
+    if mode != "scenario":
+        raise ValueError(mode)
+    # Only this short-lived scenario supervisor adopts its own orphaned child.
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # Linux PR_SET_CHILD_SUBREAPER
+        raise OSError(ctypes.get_errno(), "cannot enable test child reaping")
+    scenario, = arguments
+    check = unittest.TestCase()
+    with tempfile.TemporaryDirectory(prefix="doris-process-test-") as directory:
+        root = Path(directory)
+        work = root / ".lab"
+        work.mkdir()
+        seed = b'{"run_id":"seed","status":"success","passed":6}\n'
+        latest = work / "results.json"
+        latest.write_bytes(seed)
+        socket_path = str(root / "handshake.sock")
+        parent = None
+        child_pid = None
+        child_fd = None
+        child_reaped = False
+
+        def contender():
+            return subprocess.run(
+                [sys.executable, "-W", "error", script, "--signal-worker",
+                 "contender", directory],
+                capture_output=True, text=True, timeout=3,
+            )
+
+        def result_bytes():
+            return {str(path.relative_to(work)): path.read_bytes()
+                    for path in [latest, *sorted((work / "runs").rglob("*.json"))]}
+
+        try:
+            with socket.socket(socket.AF_UNIX) as listener, socket.socket(socket.AF_UNIX) as arm_listener:
+                listener.bind(socket_path)
+                listener.listen(1)
+                listener.settimeout(3)
+                if scenario == "timeout":
+                    arm_listener.bind(str(root / "arm.sock"))
+                    arm_listener.listen(1)
+                    arm_listener.settimeout(3)
+                parent = subprocess.Popen(
+                    [sys.executable, "-W", "error", script, "--signal-worker",
+                     "parent", directory, socket_path, scenario],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                connection, _ = listener.accept()
+                with connection, connection.makefile("rb") as messages:
+                    connection.settimeout(3)
+                    child_pid = json.loads(messages.readline())["pid"]
+                    child_fd = os.pidfd_open(child_pid)
+                    active_bytes = latest.read_bytes()
+                    active = json.loads(active_bytes)
+                    check.assertEqual(active["status"], "running")
+                    original_history = work / "runs" / active["run_id"]
+                    check.assertEqual((original_history / "previous-results.json").read_bytes(), seed)
+                    if scenario == "timeout":
+                        arm, _ = arm_listener.accept()
+                        with arm:
+                            arm.settimeout(3)
+                            with arm.makefile("rb") as arm_messages:
+                                check.assertEqual(arm_messages.readline(), b"SPAWNED\n")
+                            arm.sendall(b"ARM\n")
+                        parent_returncode = parent.wait(timeout=3)
+                        check.assertTrue(select.select([child_fd], [], [], 1)[0])
+                        # subprocess.run must have killed AND waited, so this
+                        # supervisor must not inherit an unreaped timeout child.
+                        with check.assertRaises(ChildProcessError):
+                            os.waitpid(child_pid, os.WNOHANG)
+                        child_reaped = True
+                        interrupted_bytes = latest.read_bytes()
+                        interrupted = json.loads(interrupted_bytes)
+                        check.assertEqual(interrupted["status"], "failed")
+                        check.assertEqual(interrupted["error"]["type"], "TimeoutExpired")
+                    else:
+                        parent.send_signal(getattr(signal, scenario))
+                        parent_returncode = parent.wait(timeout=3)
+                        connection.sendall(b"PING\n")
+                        check.assertEqual(messages.readline(), b"ALIVE\n")
+                        before = result_bytes()
+                        rejected = contender()
+                        check.assertEqual(rejected.returncode, 23, rejected.stdout + rejected.stderr)
+                        check.assertIn("CONTENDER_REJECTED", rejected.stdout)
+                        check.assertFalse((root / "entered").exists())
+                        check.assertEqual(result_bytes(), before)
+                        check.assertEqual(latest.read_bytes(), active_bytes)
+                        connection.sendall(b"WRITE\n")
+                        check.assertEqual(messages.readline().decode().strip(), active["run_id"])
+                        connection.sendall(b"EXIT\n")
+                        check.assertEqual(messages.readline(), b"EXITING\n")
+                        check.assertTrue(select.select([child_fd], [], [], 3)[0])
+                        check.assertEqual(os.waitpid(child_pid, 0)[1], 0)
+                        child_reaped = True
+                        interrupted_bytes = active_bytes
+                        interrupted = active
+                    stdout, stderr = parent.communicate(timeout=3)
+                    check.assertEqual(stderr, "", stdout + stderr)
+                    accepted = contender()
+                    check.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+                    new = json.loads(latest.read_text())
+                    check.assertNotEqual(new["run_id"], active["run_id"])
+                    check.assertEqual(new["status"], "success")
+                    check.assertEqual((root / "entered").read_text(), new["run_id"])
+                    archived = work / "runs" / new["run_id"] / "previous-results.json"
+                    check.assertEqual(archived.read_bytes(), interrupted_bytes)
+                    check.assertEqual((original_history / "previous-results.json").read_bytes(), seed)
+                    finding = {
+                        "mode": scenario,
+                        "parent_returncode": parent_returncode,
+                        "interrupted_status": interrupted["status"],
+                        "error_type": interrupted.get("error", {}).get("type"),
+                        "child_exited_and_reaped": child_reaped,
+                        "contender_rejected_while_child_alive": True if scenario != "timeout" else None,
+                        "latest_and_history_unchanged_on_rejection": True if scenario != "timeout" else None,
+                        "contender_entered_after_child_exit": True,
+                        "interrupted_and_seed_history_preserved_exactly": True,
+                    }
+                    print("PROCESS_FINDING " + json.dumps(finding, sort_keys=True), flush=True)
+        finally:
+            try:
+                if parent is not None:
+                    if parent.poll() is None:
+                        parent.kill()
+                    parent.wait(timeout=3)  # Ensure orphan adoption before reaping.
+            finally:
+                try:
+                    if child_fd is not None:
+                        try:
+                            if not child_reaped:
+                                if not select.select([child_fd], [], [], 0)[0]:
+                                    signal.pidfd_send_signal(child_fd, signal.SIGKILL)
+                                if not select.select([child_fd], [], [], 3)[0]:
+                                    raise RuntimeError("owned test child did not exit")
+                                try:
+                                    os.waitpid(child_pid, 0)
+                                except ChildProcessError:
+                                    pass  # Its original parent already reaped it.
+                                child_reaped = True
+                        finally:
+                            os.close(child_fd)
+                finally:
+                    try:
+                        if parent is not None:
+                            parent.communicate(timeout=3)
+                    finally:
+                        print("PROCESS_CLEANUP " + json.dumps({
+                            "mode": scenario,
+                            "parent_pid": parent.pid if parent is not None else None,
+                            "parent_reaped": parent is not None and parent.returncode is not None,
+                            "child_pid": child_pid,
+                            "child_reaped": child_reaped,
+                        }, sort_keys=True), flush=True)
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if sys.argv[1:2] == ["--signal-worker"]:
+        process_worker(*sys.argv[2:])
+    else:
+        unittest.main()
